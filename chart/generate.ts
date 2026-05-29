@@ -1,9 +1,17 @@
 /**
- * Reads ../results.ndjson (DOT price per exchange, sampled over time) and
- * generates a self-contained chart.html with two Chart.js line charts:
+ * Reads ../results.ndjson (DOT spot price per exchange, sampled every few
+ * seconds) and ../vwap.ndjson (24h VWAP + quote volume per exchange, sampled
+ * less frequently) and writes a self-contained chart.html with three Chart.js
+ * line charts:
+ *
  *   1. Raw price per exchange over time.
  *   2. Per-exchange deviation from the cross-exchange mean (in basis points),
  *      which makes the arbitrage spread between exchanges visible.
+ *   3. Volume-weighted "real price" — sum(spot_i × volume_i) / sum(volume_i),
+ *      using each exchange's latest 24h quote volume — overlaid with each
+ *      exchange's 24h VWAP. Exchanges with more liquidity dominate the line.
+ *
+ * The third chart is omitted if vwap.ndjson is missing or empty.
  *
  * Usage:  node chart/generate.ts        (Node >= 22, runs TS directly)
  * Output: chart/chart.html  — open it in a browser.
@@ -15,9 +23,12 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const inputPath = join(here, "..", "results.ndjson");
 const errorsPath = join(here, "..", "errors.ndjson");
+const vwapPath = join(here, "..", "vwap.ndjson");
 const outputPath = join(here, "chart.html");
 
 type Row = { ts: number } & Record<string, number>;
+type VwapSample = { vwap: number; volume: number };
+type VwapRow = { ts: number } & Record<string, VwapSample>;
 
 const rows: Row[] = readFileSync(inputPath, "utf8")
   .split("\n")
@@ -140,6 +151,133 @@ const buildErrorDatasets = (yField: "price" | "dev") =>
 const priceErrorDatasets = buildErrorDatasets("price");
 const devErrorDatasets = buildErrorDatasets("dev");
 
+// --- VWAP & volume-weighted real price ---------------------------------------
+//
+// Each spot row picks the most recent VWAP row at or before its timestamp (we
+// never use future volumes). Real price per row = Σ(spot_i × vol_i) / Σ(vol_i)
+// over exchanges that have BOTH a spot price this round and a volume in the
+// chosen VWAP row.
+const vwapRows: VwapRow[] = existsSync(vwapPath)
+  ? readFileSync(vwapPath, "utf8")
+      .split("\n")
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l) as VwapRow)
+  : [];
+
+const haveVwap = vwapRows.length > 0;
+
+// For each spot row, find the index of the latest vwap row with ts <= spot.ts.
+// Returns -1 if no vwap row precedes this spot row.
+const vwapTs = vwapRows.map((r) => r.ts);
+const latestVwapIdx = (ts: number) => {
+  if (vwapTs.length === 0 || vwapTs[0] > ts) return -1;
+  let lo = 0, hi = vwapTs.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (vwapTs[mid] <= ts) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+};
+
+// Real price per spot row, and per-exchange VWAP value snapshot per spot row.
+// Also compute the unweighted arithmetic mean of spot prices per row, so the
+// third chart can show both means side-by-side: the bold black volume-weighted
+// "real price" and the orange unweighted mean. The gap between them shows how
+// much liquidity weighting actually shifts the cross-exchange consensus.
+const realPriceByRow: (number | null)[] = [];
+const meanPriceByRow: (number | null)[] = [];
+const vwapPerExchangeByRow: Record<string, (number | null)[]> = Object.fromEntries(
+  exchanges.map((e) => [e, []]),
+);
+
+for (const r of rows) {
+  const spots = exchanges
+    .map((e) => r[e])
+    .filter((v): v is number => typeof v === "number");
+  meanPriceByRow.push(spots.length > 0 ? spots.reduce((s, v) => s + v, 0) / spots.length : null);
+
+  const vi = latestVwapIdx(r.ts);
+  if (vi < 0) {
+    realPriceByRow.push(null);
+    for (const e of exchanges) vwapPerExchangeByRow[e].push(null);
+    continue;
+  }
+  const vr = vwapRows[vi];
+  let num = 0, den = 0;
+  for (const e of exchanges) {
+    const s = vr[e];
+    if (typeof r[e] !== "number") continue;
+    if (!s || typeof s.volume !== "number" || s.volume <= 0) continue;
+    num += r[e] * s.volume;
+    den += s.volume;
+  }
+  realPriceByRow.push(den > 0 ? num / den : null);
+  for (const e of exchanges) {
+    const s = vr[e];
+    vwapPerExchangeByRow[e].push(s && typeof s.vwap === "number" ? s.vwap : null);
+  }
+}
+
+const realDataset = {
+  label: "Real price (vol-weighted)",
+  data: realPriceByRow,
+  borderColor: "#111",
+  backgroundColor: "#111",
+  borderWidth: 2.5,
+  pointRadius: 0,
+  tension: 0.1,
+  spanGaps: false,
+};
+
+const meanDataset = {
+  label: "Simple mean (unweighted)",
+  data: meanPriceByRow,
+  borderColor: "#ff7700",
+  backgroundColor: "#ff7700",
+  borderWidth: 2,
+  pointRadius: 0,
+  tension: 0.1,
+  spanGaps: false,
+};
+
+const vwapDatasets = exchanges.map((ex, i) => ({
+  label: `${ex} VWAP`,
+  data: vwapPerExchangeByRow[ex],
+  borderColor: color(i),
+  backgroundColor: color(i),
+  borderWidth: 1,
+  borderDash: [4, 4],
+  pointRadius: 0,
+  tension: 0,
+  spanGaps: false,
+}));
+
+const realChartSection = haveVwap
+  ? `
+  <div class="chart-head">
+    <h2>Volume-weighted real price (USD)</h2>
+    <button onclick="realChart.resetZoom()">Reset zoom</button>
+  </div>
+  <p class="hint">bold black = Σ(spot × vol) / Σ(vol) using latest 24h quote volumes · orange = unweighted arithmetic mean · dashed = per-exchange 24h VWAP · scroll = zoom · drag = pan · double-click = reset</p>
+  <div class="chart-wrap"><canvas id="real"></canvas></div>`
+  : "";
+
+const realChartScript = haveVwap
+  ? `
+const realDataset = ${JSON.stringify(realDataset)};
+const meanDataset = ${JSON.stringify(meanDataset)};
+const vwapDatasets = ${JSON.stringify(vwapDatasets)};
+const realChart = new Chart(document.getElementById("real"), {
+  type: "line",
+  data: { labels, datasets: [realDataset, meanDataset, ...vwapDatasets] },
+  options: { ...common, scales: { ...common.scales, y: { title: { display: true, text: "USD" } } } },
+});
+document.getElementById("real").addEventListener("dblclick", () => realChart.resetZoom());`
+  : "";
+
+const vwapMeta = haveVwap ? ` · ${vwapRows.length} VWAP sample${vwapRows.length === 1 ? "" : "s"}` : "";
+
 const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -163,7 +301,7 @@ const html = `<!doctype html>
 </head>
 <body>
   <h1>DOT price across exchanges</h1>
-  <p class="meta">${rows.length} samples · ${exchanges.length} exchanges · ${dateLabel} · ${labels[0]}–${labels[labels.length - 1]} · ${errorCount} error${errorCount === 1 ? "" : "s"}</p>
+  <p class="meta">${rows.length} samples · ${exchanges.length} exchanges · ${dateLabel} · ${labels[0]}–${labels[labels.length - 1]} · ${errorCount} error${errorCount === 1 ? "" : "s"}${vwapMeta}</p>
 
   <div class="chart-head">
     <h2>Price (USD)</h2>
@@ -178,7 +316,7 @@ const html = `<!doctype html>
   </div>
   <p class="hint">scroll = zoom · drag = pan · double-click = reset</p>
   <div class="chart-wrap"><canvas id="dev"></canvas></div>
-
+${realChartSection}
 <script>
 const labels = ${JSON.stringify(labels)};
 const priceDatasets = ${JSON.stringify(priceDatasets)};
@@ -237,9 +375,12 @@ const devChart = new Chart(document.getElementById("dev"), {
 // Double-click anywhere on a chart to reset its zoom.
 document.getElementById("price").addEventListener("dblclick", () => priceChart.resetZoom());
 document.getElementById("dev").addEventListener("dblclick", () => devChart.resetZoom());
+${realChartScript}
 </script>
 </body>
 </html>`;
 
 writeFileSync(outputPath, html);
-console.log(`Wrote ${outputPath} (${rows.length} samples, ${exchanges.length} exchanges)`);
+console.log(
+  `Wrote ${outputPath} (${rows.length} samples, ${exchanges.length} exchanges, ${vwapRows.length} VWAP samples)`,
+);

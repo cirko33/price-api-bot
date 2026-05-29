@@ -56,11 +56,13 @@ cargo run --release -- --interval 6000
 
 | Flag | Description |
 |------|-------------|
-| `-i`, `--interval <ms>` | Poll repeatedly every `<ms>` milliseconds. Omit to run once and exit. |
+| `-i`, `--interval <ms>` | Poll spot prices every `<ms>` milliseconds. Omit to run once and exit. |
+| `--vwap-interval <ms>` | Poll 24h VWAP + quote volume every `<ms>` milliseconds. Default: `3600000` (1 hour). Only used with `--interval`; single-shot mode always does one VWAP poll. |
 | `-o`, `--results <file>` (alias `--ndjson`) | Path for the prices log. Default: `results_<ts>.ndjson`. |
-| `-e`, `--errors <file>` | Path for the errors log. Default: `error_<ts>.ndjson`. |
-| `--no-log` | Disable all file logging (cannot be combined with `--results`/`--errors`). |
-| `-q`, `--quiet` | Suppress the stdout table; file logs are still written. |
+| `-e`, `--errors <file>` | Path for the errors log (used for both spot and VWAP failures). Default: `error_<ts>.ndjson`. |
+| `--vwap-results <file>` | Path for the VWAP log. Default: `vwap_<ts>.ndjson`. |
+| `--no-log` | Disable all file logging (cannot be combined with `--results`/`--errors`/`--vwap-results`). |
+| `-q`, `--quiet` | Suppress the stdout tables; file logs are still written. |
 | `-h`, `--help` | Print usage and exit. |
 
 When run once, the process exits non-zero if every source failed.
@@ -75,20 +77,37 @@ Both logs are [NDJSON](https://ndjson.org) (one JSON object per line, flushed im
 {"ts":1779874404,"Binance":1.259,"OKX":1.259,"Coinbase":1.257,"Kraken":1.2573,"Bybit":1.259,"KuCoin":1.2595,"Crypto.com":1.2574,"Gate.io":1.26}
 ```
 
-`errors.ndjson` — only written when a round has failures, keeping it signal-only:
+`errors.ndjson` — only written when a round has failures, keeping it signal-only.
+VWAP-poll failures share the same file, prefixed with `vwap:`:
 
 ```json
 {"ts":1779890527,"OKX":"HTTP status client error (409 Conflict) for url (https://www.okx.com/api/v5/market/ticker?instId=DOT-USDT)"}
+{"ts":1779894127,"vwap:Coinbase":"HTTP status server error (502 Bad Gateway) for url (https://api.exchange.coinbase.com/products/DOT-USD/stats)"}
+```
+
+`vwap.ndjson` — one line per VWAP round, with nested `{vwap, volume}` per exchange.
+`volume` is the 24h quote volume (USD/USDT):
+
+```json
+{"ts":1779890527,"Binance":{"vwap":1.2587,"volume":7194409.12},"OKX":{"vwap":1.2065,"volume":1505644.5}, ...}
 ```
 
 ## Chart
 
-`chart/generate.ts` reads `results.ndjson` (and `errors.ndjson` if present) and writes a
-self-contained `chart/chart.html` with two interactive Chart.js line charts:
+`chart/generate.ts` reads `results.ndjson` (and `errors.ndjson` / `vwap.ndjson` if present)
+and writes a self-contained `chart/chart.html` with up to three interactive Chart.js line
+charts:
 
 1. Raw price per exchange over time.
 2. Per-exchange deviation from the cross-exchange mean (in basis points), which makes the
    arbitrage spread between exchanges visible.
+3. **Volume-weighted "real price"** — `Σ(spot_i × volume_i) / Σ(volume_i)`, using each
+   exchange's latest 24h quote volume — overlaid with each exchange's 24h VWAP. Exchanges
+   with more liquidity dominate the bold line. Omitted if `vwap.ndjson` is missing.
+
+> Coinbase's `/stats` endpoint returns base `volume` and `last` only, so we approximate
+> its `quote_volume ≈ volume × last` and report `vwap = last`. The volume weight is correct
+> in order of magnitude; Coinbase's "VWAP" dashed line equals its last price by construction.
 
 Failed fetches are overlaid as triangle markers with the error message in the tooltip.
 Charts support scroll-to-zoom, drag-to-pan, and double-click to reset.
