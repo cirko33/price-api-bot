@@ -2,3 +2,4 @@ target/
 *.ndjson
 chart.html
 *.service
+.DS_Store
