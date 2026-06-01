@@ -8,15 +8,13 @@
 //! line across all venues.
 
 use std::collections::HashMap;
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 
-const USER_AGENT: &str = "dot-price/0.1 (+https://github.com)";
-const TIMEOUT: Duration = Duration::from_secs(8);
+use dot_price::{get_json, open_sink, parse_price, unix_secs, vwap_from, write_line, TIMEOUT, USER_AGENT};
+
 const VWAP_DEFAULT_INTERVAL_MS: u64 = 3_600_000;
 
 /// A single exchange: display name, the pair we query, a reliability note (from
@@ -380,42 +378,6 @@ async fn fetch_gate_vwap(client: &reqwest::Client) -> Result<VwapSample> {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// GET a URL and deserialize the JSON body into `T`.
-async fn get_json<T: serde::de::DeserializeOwned>(
-    client: &reqwest::Client,
-    url: &str,
-) -> Result<T> {
-    let resp = client
-        .get(url)
-        .send()
-        .await
-        .with_context(|| format!("request to {url} failed"))?
-        .error_for_status()
-        .with_context(|| format!("{url} returned an error status"))?;
-    resp.json::<T>()
-        .await
-        .with_context(|| format!("decoding JSON from {url} failed"))
-}
-
-/// Parse an exchange's price string into an `f64`.
-fn parse_price(s: &str) -> Result<f64> {
-    s.trim()
-        .parse::<f64>()
-        .with_context(|| format!("could not parse number {s:?}"))
-}
-
-/// Compute VWAP as `quote / base`, guarding against zero base volume.
-fn vwap_from(base: f64, quote: f64) -> Result<f64> {
-    if base <= 0.0 {
-        return Err(anyhow!("zero base volume; cannot compute VWAP"));
-    }
-    Ok(quote / base)
-}
-
-// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
@@ -523,20 +485,6 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Open a log file in create+append mode, or `None` if no path is given.
-fn open_sink(path: Option<&str>) -> Result<Option<std::fs::File>> {
-    match path {
-        Some(p) => Ok(Some(
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(p)
-                .with_context(|| format!("opening log file {p:?}"))?,
-        )),
-        None => Ok(None),
-    }
-}
-
 /// Parse CLI flags.
 fn parse_args() -> Result<Config> {
     let mut cfg = Config {
@@ -639,13 +587,6 @@ fn parse_interval(v: &str) -> Result<u64> {
     Ok(ms)
 }
 
-fn unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 /// Result of one spot-price poll round.
 struct Round {
     ts: u64,
@@ -740,15 +681,6 @@ fn write_named_errors(
         }
         write_line(file, &obj)?;
     }
-    Ok(())
-}
-
-/// Write one JSON object as a line, flushed immediately so a tailing reader
-/// (or a kill mid-loop) never loses a complete record.
-fn write_line(file: &mut std::fs::File, obj: &serde_json::Map<String, serde_json::Value>) -> Result<()> {
-    let line = serde_json::to_string(obj).context("serializing NDJSON line")?;
-    writeln!(file, "{line}").context("writing NDJSON line")?;
-    file.flush().context("flushing NDJSON file")?;
     Ok(())
 }
 

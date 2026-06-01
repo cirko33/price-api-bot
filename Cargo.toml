@@ -3,12 +3,20 @@ name = "dot-price"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "dot_price"
+path = "src/lib.rs"
+
 [[bin]]
 name = "dot-price"
 path = "src/main.rs"
 
+[[bin]]
+name = "dot-history"
+path = "src/bin/dot-history.rs"
+
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

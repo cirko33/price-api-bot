@@ -21,10 +21,21 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const inputPath = join(here, "..", "results.ndjson");
-const errorsPath = join(here, "..", "errors.ndjson");
-const vwapPath = join(here, "..", "vwap.ndjson");
-const outputPath = join(here, "chart.html");
+
+// CLI overrides: --results / --vwap / --errors / --out. Relative paths resolve
+// against the current working directory. Defaults match the live dot-price logs.
+const argv = process.argv.slice(2);
+const flag = (name: string) => {
+  const i = argv.indexOf(`--${name}`);
+  if (i >= 0 && i + 1 < argv.length) return argv[i + 1];
+  const eq = argv.find((a) => a.startsWith(`--${name}=`));
+  return eq ? eq.slice(name.length + 3) : undefined;
+};
+const resolve = (p: string) => (p.startsWith("/") ? p : join(process.cwd(), p));
+const inputPath = flag("results") ? resolve(flag("results")!) : join(here, "..", "results.ndjson");
+const errorsPath = flag("errors") ? resolve(flag("errors")!) : join(here, "..", "errors.ndjson");
+const vwapPath = flag("vwap") ? resolve(flag("vwap")!) : join(here, "..", "vwap.ndjson");
+const outputPath = flag("out") ? resolve(flag("out")!) : join(here, "chart.html");
 
 type Row = { ts: number } & Record<string, number>;
 type VwapSample = { vwap: number; volume: number };
