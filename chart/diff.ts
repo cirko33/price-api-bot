@@ -27,14 +27,16 @@ type VwapRow = { ts: number } & Record<string, VwapSample>;
 const rows: Row[] = readFileSync(resultsPath, "utf8")
   .split("\n")
   .filter((l) => l.trim().length > 0)
-  .map((l) => JSON.parse(l) as Row);
+  .map((l) => JSON.parse(l) as Row)
+  .sort((a, b) => a.ts - b.ts);
 if (rows.length === 0) throw new Error("no data in results.ndjson");
 
 if (!existsSync(vwapPath)) throw new Error("vwap.ndjson missing");
 const vwapRows: VwapRow[] = readFileSync(vwapPath, "utf8")
   .split("\n")
   .filter((l) => l.trim().length > 0)
-  .map((l) => JSON.parse(l) as VwapRow);
+  .map((l) => JSON.parse(l) as VwapRow)
+  .sort((a, b) => a.ts - b.ts);
 if (vwapRows.length === 0) throw new Error("no data in vwap.ndjson");
 
 const exchanges = Object.keys(rows[0]).filter((k) => k !== "ts");
@@ -59,7 +61,18 @@ const diffBps: (number | null)[] = [];
 let sumAbsBps = 0, countBps = 0, maxAbsBps = 0;
 
 for (const r of rows) {
-  labels.push(new Date(r.ts * 1000).toLocaleTimeString("en-GB", { hour12: false, timeZone: "UTC" }));
+  labels.push(
+    new Date(r.ts * 1000).toLocaleString("en-GB", {
+      timeZone: "UTC",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    }),
+  );
 
   const spots = exchanges
     .map((e) => r[e])
@@ -144,6 +157,7 @@ const html = `<!doctype html>
   <h1>Simple mean − VWAP-weighted price</h1>
   <p class="meta">${rows.length} samples · ${exchanges.length} exchanges · ${range} · mean |diff| = ${fmt(meanAbsBps)} bps · max |diff| = ${fmt(maxAbsBps)} bps</p>
   <p class="hint"><code>diff = mean(spot_i) − Σ(spot_i × vol_i) / Σ(vol_i)</code> · positive ⇒ unweighted mean above liquidity-weighted price · scroll = zoom · drag = pan · double-click = reset</p>
+  <p class="hint"><b>bps</b> = basis points = 1/100th of a percent of the VWAP-weighted price (100 bps = 1% = 0.01×price; 1 bps = 0.01%). Hover a point to see the percent equivalent.</p>
   <div class="chart-head">
     <button onclick="diffChart.resetZoom()">Reset zoom</button>
   </div>
@@ -167,6 +181,18 @@ const diffChart = new Chart(document.getElementById("diff"), {
     },
     plugins: {
       legend: { position: "top" },
+      tooltip: {
+        callbacks: {
+          label: (ctx) => {
+            const v = ctx.parsed.y;
+            if (v === null || v === undefined) return ctx.dataset.label;
+            if (ctx.dataset.yAxisID === "yBps") {
+              return ctx.dataset.label + ": " + v.toFixed(3) + " bps (" + (v / 100).toFixed(4) + "%)";
+            }
+            return ctx.dataset.label + ": " + v.toFixed(5) + " USD";
+          },
+        },
+      },
       zoom: {
         pan: { enabled: true, mode: "x" },
         zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: "x" },

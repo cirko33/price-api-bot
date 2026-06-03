@@ -1,5 +1,6 @@
 //! Backfill a year (or any window) of DOT spot prices and 24h rolling VWAP from
-//! the same eight exchanges as the live `dot-price` binary. Writes NDJSON in the
+//! seven exchanges (same set as the live `dot-price` binary, minus Gate.io).
+//! Writes NDJSON in the
 //! exact same schema as `results.ndjson` / `vwap.ndjson` / `errors.ndjson` so the
 //! existing `chart/generate.ts` can render the output unchanged.
 //!
@@ -88,7 +89,7 @@ fn parse_args() -> Result<Config> {
                      \x20                 [--results <file>] [--vwap-results <file>] [--errors <file>]\n\
                      \x20                 [--quiet]\n\
                      \n\
-                     Backfills 15m DOT candles across 8 exchanges for the window\n\
+                     Backfills 15m DOT candles across 7 exchanges for the window\n\
                      [from, to) (defaults: now-365d .. now) and writes NDJSON in the\n\
                      same schema as the live dot-price logs."
                 );
@@ -487,47 +488,6 @@ async fn fetch_cryptocom(client: &reqwest::Client, from: u64, to: u64) -> Result
     Ok(out)
 }
 
-// --- Gate.io: forward by `from`/`to` ----------------------------------------
-
-async fn fetch_gate(client: &reqwest::Client, from: u64, to: u64) -> Result<Vec<Candle>> {
-    // Each row: [t(s), quote_volume, close, high, low, open, base_volume, ...]
-    let mut out = Vec::new();
-    let mut start = from;
-    let chunk = STEP * 1000;
-    while start < to {
-        let end = (start + chunk).min(to);
-        let url = format!(
-            "https://api.gateio.ws/api/v4/spot/candlesticks?currency_pair=DOT_USDT&interval=15m&from={start}&to={end}"
-        );
-        let rows: Vec<Vec<serde_json::Value>> = with_retry(|| get_json(client, &url)).await?;
-        if rows.is_empty() {
-            start = end;
-            tokio::time::sleep(Duration::from_millis(PER_CALL_DELAY_MS)).await;
-            continue;
-        }
-        for r in &rows {
-            if r.len() < 6 {
-                continue;
-            }
-            let t_str = r[0].as_str().unwrap_or("");
-            let t: u64 = t_str.parse().unwrap_or(0);
-            if t < from || t >= to {
-                continue;
-            }
-            let qvol = parse_price(r[1].as_str().unwrap_or(""))?;
-            let close = parse_price(r[2].as_str().unwrap_or(""))?;
-            out.push(Candle {
-                ts: snap(t),
-                close,
-                quote_volume: qvol,
-            });
-        }
-        start = end;
-        tokio::time::sleep(Duration::from_millis(PER_CALL_DELAY_MS)).await;
-    }
-    Ok(out)
-}
-
 // ---------------------------------------------------------------------------
 // Alignment + output
 // ---------------------------------------------------------------------------
@@ -542,7 +502,6 @@ const EXCHANGES: &[&str] = &[
     "Bybit",
     "KuCoin",
     "Crypto.com",
-    "Gate.io",
 ];
 
 /// Result of fetching one exchange's full history.
@@ -570,9 +529,9 @@ async fn main() -> Result<()> {
         eprintln!("errors  -> {}", cfg.errors_path);
     }
 
-    // Run all eight fetchers concurrently. Map each Result to a stringified
+    // Run all seven fetchers concurrently. Map each Result to a stringified
     // error so a single failed venue doesn't sink the whole run.
-    let (binance, okx, coinbase, kraken, bybit, kucoin, cryptocom, gate) = tokio::join!(
+    let (binance, okx, coinbase, kraken, bybit, kucoin, cryptocom) = tokio::join!(
         wrap(fetch_binance(&client, from, to), "Binance", cfg.quiet),
         wrap(fetch_okx(&client, from, to), "OKX", cfg.quiet),
         wrap(fetch_coinbase(&client, from, to), "Coinbase", cfg.quiet),
@@ -580,7 +539,6 @@ async fn main() -> Result<()> {
         wrap(fetch_bybit(&client, from, to), "Bybit", cfg.quiet),
         wrap(fetch_kucoin(&client, from, to), "KuCoin", cfg.quiet),
         wrap(fetch_cryptocom(&client, from, to), "Crypto.com", cfg.quiet),
-        wrap(fetch_gate(&client, from, to), "Gate.io", cfg.quiet),
     );
 
     let fetched: Vec<(&'static str, FetchResult)> = vec![
@@ -591,7 +549,6 @@ async fn main() -> Result<()> {
         ("Bybit", bybit),
         ("KuCoin", kucoin),
         ("Crypto.com", cryptocom),
-        ("Gate.io", gate),
     ];
 
     // Index: per-exchange (ts → candle), so VWAP lookups can walk a 96-slot
