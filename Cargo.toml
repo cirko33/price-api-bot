@@ -15,6 +15,10 @@ path = "src/main.rs"
 name = "dot-history"
 path = "src/bin/dot-history.rs"
 
+[[bin]]
+name = "dot-divergence"
+path = "src/bin/dot-divergence.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
