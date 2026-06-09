@@ -33,19 +33,24 @@ type VwapRow = { ts: number } & Record<string, VwapSample>;
 const rows: Row[] = readFileSync(inputPath, "utf8")
   .split("\n")
   .filter((line) => line.trim().length > 0)
-  .map((line) => JSON.parse(line) as Row);
+  .map((line) => JSON.parse(line) as Row)
+  // Sort by timestamp: the chart and the binary searches below assume the
+  // rows are in chronological order, but the input is not guaranteed to be.
+  .sort((a, b) => a.ts - b.ts);
 
 if (rows.length === 0) throw new Error("no data in results.ndjson");
 
 // Every key except `ts` is an exchange.
 const exchanges = Object.keys(rows[0]).filter((k) => k !== "ts");
 
-// X axis: HH:MM:SS local time (ts is in unix seconds). Date shown in meta.
+// X axis is a real time scale: labels are unix-ms timestamps, and Chart.js's
+// time scale renders date+time ticks at the right granularity (and keeps the
+// spacing proportional to the actual time gaps between samples).
 const fmtTime = (ts: number) =>
   new Date(ts * 1000).toLocaleTimeString("en-GB", { hour12: false });
 const fmtDate = (ts: number) =>
   new Date(ts * 1000).toLocaleDateString("en-CA"); // YYYY-MM-DD
-const labels = rows.map((r) => fmtTime(r.ts));
+const labels = rows.map((r) => r.ts * 1000);
 const dateLabel =
   fmtDate(rows[0].ts) === fmtDate(rows[rows.length - 1].ts)
     ? fmtDate(rows[0].ts)
@@ -87,7 +92,7 @@ const devDatasets = exchanges.map((ex, i) => ({
 }));
 
 // --- Errors: ndjson rows like {ts, <Exchange>: "<message>", ...}. -----------
-type ErrorMarker = { x: string; y: number; msg: string; ts: number };
+type ErrorMarker = { x: number; y: number; msg: string; ts: number };
 
 // Find the index of the closest results.ndjson row by timestamp.
 const tsArr = rows.map((r) => r.ts);
@@ -162,6 +167,8 @@ const vwapRows: VwapRow[] = existsSync(vwapPath)
       .split("\n")
       .filter((l) => l.trim().length > 0)
       .map((l) => JSON.parse(l) as VwapRow)
+      // latestVwapIdx() below binary-searches these, so they must be sorted.
+      .sort((a, b) => a.ts - b.ts)
   : [];
 
 const haveVwap = vwapRows.length > 0;
@@ -285,6 +292,7 @@ const html = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>DOT price across exchanges</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/hammerjs@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2"></script>
 <style>
@@ -301,7 +309,7 @@ const html = `<!doctype html>
 </head>
 <body>
   <h1>DOT price across exchanges</h1>
-  <p class="meta">${rows.length} samples · ${exchanges.length} exchanges · ${dateLabel} · ${labels[0]}–${labels[labels.length - 1]} · ${errorCount} error${errorCount === 1 ? "" : "s"}${vwapMeta}</p>
+  <p class="meta">${rows.length} samples · ${exchanges.length} exchanges · ${dateLabel} · ${fmtTime(rows[0].ts)}–${fmtTime(rows[rows.length - 1].ts)} · ${errorCount} error${errorCount === 1 ? "" : "s"}${vwapMeta}</p>
 
   <div class="chart-head">
     <h2>Price (USD)</h2>
@@ -325,6 +333,12 @@ const priceErrorDatasets = ${JSON.stringify(priceErrorDatasets)};
 const devErrorDatasets = ${JSON.stringify(devErrorDatasets)};
 
 const tooltipCallbacks = {
+  // Title shows the full date + time of the hovered point (x is a unix-ms
+  // timestamp on the time scale).
+  title: (items) =>
+    items.length
+      ? new Date(items[0].parsed.x).toLocaleString("en-GB", { hour12: false })
+      : "",
   // Custom label so error points show "<Exchange> error @ HH:MM:SS — <msg>",
   // while normal line points keep Chart.js's default formatting.
   label: (ctx) => {
@@ -340,7 +354,23 @@ const common = {
   responsive: true,
   maintainAspectRatio: false,
   interaction: { mode: "nearest", intersect: false },
-  scales: { x: { type: "category", ticks: { maxTicksLimit: 12, autoSkip: true } } },
+  scales: {
+    x: {
+      type: "time",
+      time: {
+        // Tooltip already overridden via callbacks; these control the axis ticks.
+        displayFormats: {
+          second: "HH:mm:ss",
+          minute: "HH:mm",
+          hour: "MMM d, HH:mm",
+          day: "MMM d",
+          week: "MMM d",
+          month: "MMM yyyy",
+        },
+      },
+      ticks: { maxTicksLimit: 12, autoSkip: true, maxRotation: 0 },
+    },
+  },
   plugins: {
     legend: {
       position: "top",
@@ -355,7 +385,7 @@ const common = {
         pinch: { enabled: true },
         mode: "x",
       },
-      limits: { x: { minRange: 5 } },  // can't zoom past ~5 samples
+      limits: { x: { minRange: 1000 * 30 } },  // can't zoom past a ~30s window
     },
   },
 };
